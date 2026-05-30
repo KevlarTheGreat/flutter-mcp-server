@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "flutter": {
+      "command": "node",
+      "args": ["C:/Users/Brian/Documents/Claude/Projects/flutter-mcp-server/dist/index.js"]
+    }
+  }
+}
