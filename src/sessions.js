@@ -162,7 +162,10 @@ export class SessionManager {
   async listDevices() {
     return new Promise((resolve, reject) => {
       let output = '';
-      const proc = spawn('flutter', ['devices', '--machine'], { windowsHide: true });
+      const proc = spawn('flutter', ['devices', '--machine'], {
+        windowsHide: true,
+        shell: process.platform === 'win32',
+      });
       proc.stdout.on('data', (d) => (output += d.toString()));
       proc.on('close', (code) => {
         if (code !== 0) { reject(new Error(`flutter devices exited with code ${code}`)); return; }

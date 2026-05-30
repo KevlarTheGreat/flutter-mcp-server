@@ -24,10 +24,13 @@ export class FlutterDaemon extends EventEmitter {
     this._dead = false;
     this._exitCode = null;
 
+    // On Windows `flutter` is flutter.bat; spawn needs a shell to launch
+    // .bat/.cmd files (Node blocks direct .bat execution since CVE-2024-27980).
     this.proc = spawn('flutter', ['run', '--machine', ...extraArgs], {
       cwd: projectPath,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      shell: process.platform === 'win32',
     });
 
     const rl = createInterface({ input: this.proc.stdout, crlfDelay: Infinity });
@@ -79,7 +82,20 @@ export class FlutterDaemon extends EventEmitter {
   }
 
   kill(signal = 'SIGTERM') {
-    if (!this._dead) this.proc.kill(signal);
+    if (this._dead) return;
+    if (process.platform === 'win32' && this.proc.pid) {
+      // this.proc is cmd.exe (shell:true) — kill the whole tree so the
+      // underlying flutter/dart processes don't get orphaned.
+      try {
+        spawn('taskkill', ['/pid', String(this.proc.pid), '/T', '/F'], {
+          windowsHide: true,
+        });
+      } catch {
+        this.proc.kill(signal);
+      }
+    } else {
+      this.proc.kill(signal);
+    }
   }
 
   _handleLine(raw) {
