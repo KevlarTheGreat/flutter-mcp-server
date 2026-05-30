@@ -1,25 +1,21 @@
 /**
- * flutter-mcp-server — generic Flutter development MCP server.
+ * flutter-mcp-server — zero external dependencies.
+ * Requires Node.js 22+ (built-in WebSocket).
  *
- * Exposes hot reload, hot restart, logging, device management, and raw
- * VM Service calls as AI-callable tools via the Model Context Protocol.
- *
- * No build step required — runs directly with Node.js:
- *   node src/index.js
- *
- * Claude Desktop config entry:
- *   "flutter": {
- *     "command": "node",
- *     "args": ["C:/path/to/flutter-mcp-server/src/index.js"]
- *   }
+ * MCP protocol implemented directly (Content-Length framing + JSON-RPC 2.0).
+ * No npm install needed — just: node src/index.js
  */
-
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { SessionManager } from './sessions.js';
 import { VmServiceClient } from './vm-service.js';
+
+// ── Startup check ─────────────────────────────────────────────────────────────
+
+const [major] = process.versions.node.split('.').map(Number);
+if (major < 22) {
+  process.stderr.write(`flutter-mcp-server requires Node.js 22+. You have ${process.versions.node}\n`);
+  process.exit(1);
+}
 
 const sessions = new SessionManager();
 
@@ -28,15 +24,13 @@ const sessions = new SessionManager();
 const TOOLS = [
   {
     name: 'flutter_start',
-    description:
-      'Start a Flutter app with `flutter run --machine`. ' +
-      'Waits for the app to finish launching. Must be called before hot_reload/hot_restart.',
+    description: 'Start a Flutter app with `flutter run --machine`. Waits for the app to finish launching. Must be called before hot_reload/hot_restart.',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Absolute path to the Flutter project (must contain pubspec.yaml).' },
-        device: { type: 'string', description: 'Device/platform to target (e.g. "windows", "chrome", device ID from flutter_list_devices). Omit for Flutter default.' },
-        additionalArgs: { type: 'array', items: { type: 'string' }, description: 'Extra args passed to flutter run, e.g. ["--flavor", "dev"].' },
+        device: { type: 'string', description: 'Device/platform to target (e.g. "windows", "chrome", or a device ID from flutter_list_devices). Omit for Flutter default.' },
+        additionalArgs: { type: 'array', items: { type: 'string' }, description: 'Extra args for flutter run, e.g. ["--flavor", "dev"].' },
         startTimeoutSeconds: { type: 'number', description: 'Seconds to wait for the app to start. Default: 120.' },
       },
       required: ['projectPath'],
@@ -44,27 +38,23 @@ const TOOLS = [
   },
   {
     name: 'flutter_hot_reload',
-    description:
-      'Perform a Flutter hot reload (incremental, preserves state). ' +
-      'Use after editing widget/build code. Automatically schedules a render frame.',
+    description: 'Hot reload (incremental, preserves state). Use after editing widget/build code. Automatically schedules a render frame.',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        appExtensionPrefix: { type: 'string', description: 'App-specific VM extension prefix for custom frame scheduling (e.g. "reme" uses ext.reme.forceFrame). Falls back to ext.flutter.reassemble.' },
+        appExtensionPrefix: { type: 'string', description: 'App VM extension prefix for frame scheduling (e.g. "reme" → ext.reme.forceFrame). Falls back to ext.flutter.reassemble.' },
       },
     },
   },
   {
     name: 'flutter_hot_restart',
-    description:
-      'Perform a Flutter hot restart (full, resets state, re-runs main()). ' +
-      'Use when structural changes need to take effect.',
+    description: 'Hot restart (full, resets state, re-runs main()). Use when structural changes need to take effect.',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        appExtensionPrefix: { type: 'string', description: 'VM extension prefix for custom frame scheduling (see flutter_hot_reload).' },
+        appExtensionPrefix: { type: 'string', description: 'App VM extension prefix for frame scheduling.' },
       },
     },
   },
@@ -80,7 +70,7 @@ const TOOLS = [
   },
   {
     name: 'flutter_status',
-    description: 'Get the current status of a Flutter session.',
+    description: 'Get the current status of a Flutter session (running, starting, stopped, etc.).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -100,8 +90,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        lines: { type: 'number', description: 'Number of most-recent lines to return. Default: 50, max: 500.' },
-        includeStderr: { type: 'boolean', description: 'Include flutter build/compile output (stderr). Default: false.' },
+        lines: { type: 'number', description: 'Lines to return (default 50, max 500).' },
+        includeStderr: { type: 'boolean', description: 'Include flutter build/compile stderr. Default: false.' },
       },
     },
   },
@@ -112,15 +102,13 @@ const TOOLS = [
   },
   {
     name: 'flutter_vm_call',
-    description:
-      'Call any Dart VM Service method or registered extension on the running app. ' +
-      'isolateId is injected automatically for ext.* calls.',
+    description: 'Call any Dart VM Service method or extension on the running app. isolateId auto-injected for ext.* calls.',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
         method: { type: 'string', description: 'VM Service method or extension RPC, e.g. "getVM", "ext.flutter.debugPaint".' },
-        params: { type: 'object', description: 'Extra parameters for the call.' },
+        params: { type: 'object', description: 'Extra call parameters.' },
       },
       required: ['method'],
     },
@@ -128,6 +116,11 @@ const TOOLS = [
 ];
 
 // ── Tool handler ──────────────────────────────────────────────────────────────
+
+function requireArg(args, key) {
+  if (args[key] == null) throw new Error(`Missing required argument: ${key}`);
+  return args[key];
+}
 
 async function callTool(name, args) {
   switch (name) {
@@ -137,7 +130,7 @@ async function callTool(name, args) {
         projectPath: requireArg(args, 'projectPath'),
         device: args.device,
         additionalArgs: args.additionalArgs,
-        startTimeoutMs: ((args.startTimeoutSeconds ?? 120)) * 1000,
+        startTimeoutMs: (args.startTimeoutSeconds ?? 120) * 1000,
       });
       return { status: session.status, projectPath: session.projectPath, device: session.device, appId: session.appId, wsUri: session.wsUri, startedAt: session.startedAt };
     }
@@ -162,14 +155,9 @@ async function callTool(name, args) {
       try { session = sessions.resolve(args.projectPath); }
       catch (e) { return { status: 'no_session', message: e.message }; }
       return {
-        status: session.status,
-        projectPath: session.projectPath,
-        device: session.device,
-        appId: session.appId,
-        wsUri: session.wsUri,
-        startedAt: session.startedAt,
-        lastReloadAt: session.lastReloadAt,
-        lastRestartAt: session.lastRestartAt,
+        status: session.status, projectPath: session.projectPath, device: session.device,
+        appId: session.appId, wsUri: session.wsUri, startedAt: session.startedAt,
+        lastReloadAt: session.lastReloadAt, lastRestartAt: session.lastRestartAt,
         uptimeSeconds: Math.floor((Date.now() - session.startedAt.getTime()) / 1000),
       };
     }
@@ -188,8 +176,7 @@ async function callTool(name, args) {
     }
 
     case 'flutter_list_devices': {
-      const devices = await sessions.listDevices();
-      return { devices };
+      return { devices: await sessions.listDevices() };
     }
 
     case 'flutter_vm_call': {
@@ -203,11 +190,8 @@ async function callTool(name, args) {
           const isolateId = await vm.mainIsolateId();
           if (isolateId) params = { isolateId, ...params };
         }
-        const result = await vm.call(method, params);
-        return { result };
-      } finally {
-        vm.close();
-      }
+        return { result: await vm.call(method, params) };
+      } finally { vm.close(); }
     }
 
     default:
@@ -215,37 +199,79 @@ async function callTool(name, args) {
   }
 }
 
-function requireArg(args, key) {
-  if (args[key] === undefined || args[key] === null) throw new Error(`Missing required argument: ${key}`);
-  return args[key];
+// ── MCP protocol (Content-Length framing + JSON-RPC 2.0) ─────────────────────
+
+let _buf = Buffer.alloc(0);
+
+function sendMsg(obj) {
+  const body = JSON.stringify(obj);
+  process.stdout.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
 }
 
-// ── MCP Server ────────────────────────────────────────────────────────────────
+function sendResult(id, result) {
+  sendMsg({ jsonrpc: '2.0', id, result });
+}
 
-const server = new Server(
-  { name: 'flutter-mcp-server', version: '1.0.0' },
-  { capabilities: { tools: {} } },
-);
+function sendError(id, code, message) {
+  sendMsg({ jsonrpc: '2.0', id, error: { code, message } });
+}
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+async function dispatch(msg) {
+  const { id, method, params = {} } = msg;
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args = {} } = request.params;
-  try {
-    const data = await callTool(name, args);
-    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-  } catch (err) {
-    return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+  // Notifications — no response
+  if (id === undefined) return;
+
+  if (method === 'initialize') {
+    return sendResult(id, {
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'flutter-mcp-server', version: '1.0.0' },
+    });
+  }
+
+  if (method === 'tools/list') {
+    return sendResult(id, { tools: TOOLS });
+  }
+
+  if (method === 'tools/call') {
+    const toolName = params.name;
+    const toolArgs = params.arguments ?? {};
+    try {
+      const data = await callTool(toolName, toolArgs);
+      return sendResult(id, { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
+    } catch (err) {
+      return sendResult(id, {
+        content: [{ type: 'text', text: `Error: ${err.message}` }],
+        isError: true,
+      });
+    }
+  }
+
+  // Unknown method
+  sendError(id, -32601, `Method not found: ${method}`);
+}
+
+process.stdin.on('data', (chunk) => {
+  _buf = Buffer.concat([_buf, chunk]);
+
+  while (true) {
+    const sep = _buf.indexOf('\r\n\r\n');
+    if (sep === -1) break;
+
+    const headers = _buf.slice(0, sep).toString('utf8');
+    const m = headers.match(/Content-Length:\s*(\d+)/i);
+    if (!m) { _buf = _buf.slice(sep + 4); continue; }
+
+    const bodyLen = parseInt(m[1], 10);
+    const bodyStart = sep + 4;
+    if (_buf.length < bodyStart + bodyLen) break; // wait for more data
+
+    const body = _buf.slice(bodyStart, bodyStart + bodyLen).toString('utf8');
+    _buf = _buf.slice(bodyStart + bodyLen);
+
+    try { dispatch(JSON.parse(body)); } catch { /* ignore malformed JSON */ }
   }
 });
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  process.stderr.write('flutter-mcp-server running (stdio)\n');
-}
-
-main().catch((err) => {
-  process.stderr.write(`Fatal: ${err}\n`);
-  process.exit(1);
-});
+process.stderr.write(`flutter-mcp-server running on Node.js ${process.versions.node} (zero deps)\n`);

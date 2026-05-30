@@ -1,18 +1,7 @@
 {
   "name": "flutter-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for Flutter development — hot reload, hot restart, logs, device management",
+  "description": "MCP server for Flutter development. Zero external dependencies — requires Node.js 22+.",
   "type": "module",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js",
-    "install-deps": "npm install"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "ws": "^8.18.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "main": "src/index.js"
 }
