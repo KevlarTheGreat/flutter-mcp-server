@@ -199,13 +199,16 @@ async function callTool(name, args) {
   }
 }
 
-// ── MCP protocol (Content-Length framing + JSON-RPC 2.0) ─────────────────────
+// ── MCP stdio transport (newline-delimited JSON-RPC 2.0) ─────────────────────
+//
+// The MCP stdio transport frames each JSON-RPC message as a single line
+// terminated by '\n'. Messages must not contain embedded newlines, which
+// JSON.stringify guarantees (it escapes them inside strings).
 
-let _buf = Buffer.alloc(0);
+let _buf = '';
 
 function sendMsg(obj) {
-  const body = JSON.stringify(obj);
-  process.stdout.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
+  process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
 function sendResult(id, result) {
@@ -252,25 +255,16 @@ async function dispatch(msg) {
   sendError(id, -32601, `Method not found: ${method}`);
 }
 
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
-  _buf = Buffer.concat([_buf, chunk]);
+  _buf += chunk;
 
-  while (true) {
-    const sep = _buf.indexOf('\r\n\r\n');
-    if (sep === -1) break;
-
-    const headers = _buf.slice(0, sep).toString('utf8');
-    const m = headers.match(/Content-Length:\s*(\d+)/i);
-    if (!m) { _buf = _buf.slice(sep + 4); continue; }
-
-    const bodyLen = parseInt(m[1], 10);
-    const bodyStart = sep + 4;
-    if (_buf.length < bodyStart + bodyLen) break; // wait for more data
-
-    const body = _buf.slice(bodyStart, bodyStart + bodyLen).toString('utf8');
-    _buf = _buf.slice(bodyStart + bodyLen);
-
-    try { dispatch(JSON.parse(body)); } catch { /* ignore malformed JSON */ }
+  let nl;
+  while ((nl = _buf.indexOf('\n')) !== -1) {
+    const line = _buf.slice(0, nl).trim();
+    _buf = _buf.slice(nl + 1);
+    if (!line) continue;
+    try { dispatch(JSON.parse(line)); } catch { /* ignore malformed JSON */ }
   }
 });
 
