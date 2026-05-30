@@ -2,10 +2,11 @@
  * flutter-mcp-server — zero external dependencies.
  * Requires Node.js 22+ (built-in WebSocket).
  *
- * MCP protocol implemented directly (Content-Length framing + JSON-RPC 2.0).
+ * MCP protocol implemented directly (newline-delimited JSON-RPC 2.0 over stdio).
  * No npm install needed — just: node src/index.js
  */
 
+import { createInterface } from 'node:readline';
 import { SessionManager } from './sessions.js';
 import { VmServiceClient } from './vm-service.js';
 
@@ -205,8 +206,6 @@ async function callTool(name, args) {
 // terminated by '\n'. Messages must not contain embedded newlines, which
 // JSON.stringify guarantees (it escapes them inside strings).
 
-let _buf = '';
-
 function sendMsg(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
@@ -219,15 +218,25 @@ function sendError(id, code, message) {
   sendMsg({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
+const SUPPORTED_PROTOCOL = '2024-11-05';
+
+function log(msg) {
+  process.stderr.write(`[flutter-mcp] ${msg}\n`);
+}
+
 async function dispatch(msg) {
   const { id, method, params = {} } = msg;
+  const hasId = id !== undefined && id !== null;
 
-  // Notifications — no response
-  if (id === undefined) return;
+  // Notifications (no id) — acknowledge silently, never respond
+  if (!hasId) return;
 
   if (method === 'initialize') {
+    // Echo back the client's protocol version when provided, so newer
+    // clients (e.g. claude-ai 2025-xx) accept the handshake.
+    const clientVersion = params?.protocolVersion;
     return sendResult(id, {
-      protocolVersion: '2024-11-05',
+      protocolVersion: clientVersion ?? SUPPORTED_PROTOCOL,
       capabilities: { tools: {} },
       serverInfo: { name: 'flutter-mcp-server', version: '1.0.0' },
     });
@@ -251,21 +260,30 @@ async function dispatch(msg) {
     }
   }
 
+  if (method === 'ping') {
+    return sendResult(id, {});
+  }
+
   // Unknown method
   sendError(id, -32601, `Method not found: ${method}`);
 }
 
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  _buf += chunk;
-
-  let nl;
-  while ((nl = _buf.indexOf('\n')) !== -1) {
-    const line = _buf.slice(0, nl).trim();
-    _buf = _buf.slice(nl + 1);
-    if (!line) continue;
-    try { dispatch(JSON.parse(line)); } catch { /* ignore malformed JSON */ }
+// Line-delimited JSON over stdin via readline (robust against chunk splits).
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let msg;
+  try {
+    msg = JSON.parse(trimmed);
+  } catch {
+    log(`ignoring non-JSON line: ${trimmed.slice(0, 120)}`);
+    return;
   }
+  Promise.resolve(dispatch(msg)).catch((err) => log(`dispatch error: ${err?.stack ?? err}`));
 });
 
-process.stderr.write(`flutter-mcp-server running on Node.js ${process.versions.node} (zero deps)\n`);
+process.on('uncaughtException', (err) => log(`uncaughtException: ${err?.stack ?? err}`));
+process.on('unhandledRejection', (err) => log(`unhandledRejection: ${err?.stack ?? err}`));
+
+log(`running on Node.js ${process.versions.node} (zero deps)`);
