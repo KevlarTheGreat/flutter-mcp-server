@@ -139,9 +139,10 @@ export class SessionManager {
         pause: false,
       }, 90_000);
 
-      // After full restart the VM gets a new debug port — wait for it
-      session.wsUri = null;
-      await this._waitForDebugPort(session, 15_000);
+      // A daemon hot restart re-runs main() in the SAME Dart VM/isolate, so
+      // the VM service URI is unchanged and no new app.debugPort fires. Keep
+      // the existing wsUri — nulling it and waiting for a new port just burns
+      // the timeout and leaves us unable to schedule a frame.
 
       session.lastRestartAt = new Date();
       session.status = 'running';
@@ -214,14 +215,6 @@ export class SessionManager {
       };
       session.daemon.once('event:app.started', onStarted);
       session.daemon.once('exit', onExit);
-    });
-  }
-
-  _waitForDebugPort(session, timeoutMs) {
-    if (session.wsUri) return Promise.resolve();
-    return new Promise((resolve) => {
-      const timer = setTimeout(resolve, timeoutMs);
-      session.daemon.once('event:app.debugPort', () => { clearTimeout(timer); resolve(); });
     });
   }
 
