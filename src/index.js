@@ -22,94 +22,163 @@ const sessions = new SessionManager();
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
+// ── Workflow documentation embedded in the server description ────────────────
+//
+// Typical session for an agent:
+//   1. flutter_list_devices          — pick a device id
+//   2. flutter_start                 — returns immediately with status "starting"
+//   3. flutter_status (poll)         — repeat until status == "running"
+//   4. edit source files
+//   5. flutter_hot_reload            — for UI/logic changes (preserves state)
+//      OR flutter_hot_restart        — for structural changes (resets state)
+//   6. flutter_stop when done
+//
+// Multiple projects can run simultaneously; pass projectPath to disambiguate.
+
 const TOOLS = [
   {
     name: 'flutter_start',
-    description: 'Start a Flutter app with `flutter run --machine`. Waits for the app to finish launching. Must be called before hot_reload/hot_restart.',
+    description:
+      'Launch a Flutter app with `flutter run --machine` and return immediately. ' +
+      'IMPORTANT: returns status "starting" while the app is still building — ' +
+      'call flutter_status in a loop until status is "running" before attempting ' +
+      'hot_reload or hot_restart. A cold Windows build typically takes 30-90 seconds; ' +
+      'subsequent builds are faster because artifacts are cached. ' +
+      'Returns an appId immediately (even while building) which identifies the session. ' +
+      'Call flutter_list_devices first to find valid device ids.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Absolute path to the Flutter project (must contain pubspec.yaml).' },
-        device: { type: 'string', description: 'Device/platform to target (e.g. "windows", "chrome", or a device ID from flutter_list_devices). Omit for Flutter default.' },
-        additionalArgs: { type: 'array', items: { type: 'string' }, description: 'Extra args for flutter run, e.g. ["--flavor", "dev"].' },
-        startTimeoutSeconds: { type: 'number', description: 'Seconds to wait for the app to start. Default: 120.' },
+        projectPath: { type: 'string', description: 'Absolute path to the Flutter project root directory (the folder that contains pubspec.yaml).' },
+        device: { type: 'string', description: 'Device or platform to run on. Use "windows" for a Windows desktop app, "chrome" for web, or a device id returned by flutter_list_devices (e.g. a connected Android phone). Omit to let Flutter choose.' },
+        additionalArgs: { type: 'array', items: { type: 'string' }, description: 'Extra arguments passed to flutter run, e.g. ["--flavor", "staging"] or ["--dart-define", "API_URL=https://example.com"].' },
       },
       required: ['projectPath'],
     },
   },
   {
     name: 'flutter_hot_reload',
-    description: 'Hot reload (incremental, preserves state). Use after editing widget/build code. Automatically schedules a render frame.',
+    description:
+      'Apply code changes to a running Flutter app without restarting it (incremental reload). ' +
+      'Preserves the current app state (navigation stack, filled forms, scroll position). ' +
+      'Use this after editing widget build() methods, styles, layouts, or business logic. ' +
+      'Automatically triggers a render frame so visual changes appear immediately. ' +
+      'Do NOT use for: adding new providers/blocs, changing initState, modifying main(), ' +
+      'adding new routes, or changing app-level config — use flutter_hot_restart instead. ' +
+      'Requires the session to be in "running" state (check flutter_status first). ' +
+      'Returns durationMs and frameScheduled to confirm success.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        appExtensionPrefix: { type: 'string', description: 'App VM extension prefix for frame scheduling (e.g. "reme" → ext.reme.forceFrame). Falls back to ext.flutter.reassemble.' },
+        projectPath: { type: 'string', description: 'Project path. Can be omitted when only one session is active.' },
+        appExtensionPrefix: { type: 'string', description: 'Optional. App-specific Dart VM extension prefix for forcing a render frame. Only set this if the app registers a custom ext.<prefix>.forceFrame extension (e.g. "reme" for the ReMe app). Omit for standard Flutter projects — the server falls back to ext.flutter.reassemble automatically.' },
       },
     },
   },
   {
     name: 'flutter_hot_restart',
-    description: 'Hot restart (full, resets state, re-runs main()). Use when structural changes need to take effect.',
+    description:
+      'Fully restart a running Flutter app — re-runs main() and rebuilds the entire widget tree. ' +
+      'Resets all app state (navigation, forms, providers, etc.) back to the initial state. ' +
+      'Use this after: adding new Riverpod providers or BLoCs, changing initState/dispose, ' +
+      'modifying main() or app-level setup, adding new routes, changing theme, or when a ' +
+      'hot reload did not produce the expected result. ' +
+      'Does NOT require a full rebuild — the Dart VM stays alive so restart is fast (~1-2s). ' +
+      'Requires the session to be in "running" state. ' +
+      'Returns durationMs and frameScheduled to confirm success.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        appExtensionPrefix: { type: 'string', description: 'App VM extension prefix for frame scheduling.' },
+        projectPath: { type: 'string', description: 'Project path. Can be omitted when only one session is active.' },
+        appExtensionPrefix: { type: 'string', description: 'Optional. Same as flutter_hot_reload. Omit for standard Flutter projects.' },
       },
     },
   },
   {
     name: 'flutter_stop',
-    description: 'Stop a running Flutter app and clean up its session.',
+    description:
+      'Stop a running Flutter app, terminate the flutter process, and remove the session. ' +
+      'Call this when you are done with a development session to free resources. ' +
+      'Safe to call even if the app is still in "starting" state.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
+        projectPath: { type: 'string', description: 'Project path. Can be omitted when only one session is active.' },
       },
     },
   },
   {
     name: 'flutter_status',
-    description: 'Get the current status of a Flutter session (running, starting, stopped, etc.).',
+    description:
+      'Get the current status and details of a Flutter session. ' +
+      'Possible status values: ' +
+      '"starting" = app is building or launching (poll until "running" before hot reload/restart); ' +
+      '"running" = app is live and accepting hot reload/restart; ' +
+      '"reloading" = hot reload in progress; ' +
+      '"restarting" = hot restart in progress; ' +
+      '"stopped" = process exited. ' +
+      'When status is not "running", the response includes recentOutput (last 8 lines of build ' +
+      'output) so you can monitor build progress or diagnose a failed launch. ' +
+      'Also returns wsUri (Dart VM Service WebSocket URL) once running, useful for flutter_vm_call.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
+        projectPath: { type: 'string', description: 'Project path. Can be omitted when only one session is active.' },
       },
     },
   },
   {
     name: 'flutter_list_sessions',
-    description: 'List all active Flutter sessions managed by this server.',
+    description:
+      'List all Flutter sessions currently managed by this server, including their status, ' +
+      'project path, device, and last reload/restart time. ' +
+      'Use this to see what is running before calling other tools.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flutter_get_logs',
-    description: 'Get recent log output from the running Flutter app.',
+    description:
+      'Retrieve recent log output from a running Flutter app. ' +
+      'App logs come from debugPrint() and print() calls in Dart code. ' +
+      'Set includeStderr:true to also see flutter build/compile output (useful for ' +
+      'diagnosing crashes or build errors).',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        lines: { type: 'number', description: 'Lines to return (default 50, max 500).' },
-        includeStderr: { type: 'boolean', description: 'Include flutter build/compile stderr. Default: false.' },
+        projectPath: { type: 'string', description: 'Project path. Can be omitted when only one session is active.' },
+        lines: { type: 'number', description: 'Number of most-recent lines to return. Default: 50, max: 500.' },
+        includeStderr: { type: 'boolean', description: 'Also return flutter build/compile output (stderr). Default: false.' },
       },
     },
   },
   {
     name: 'flutter_list_devices',
-    description: 'List Flutter-compatible devices and emulators on this machine.',
+    description:
+      'List all Flutter-compatible devices and emulators available on this machine. ' +
+      'Returns name, id, platform, and capabilities for each device. ' +
+      'Use the "id" field as the "device" parameter in flutter_start. ' +
+      'Common values: "windows" (Windows desktop), "chrome" (web), or a device serial for ' +
+      'connected Android/iOS devices.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flutter_vm_call',
-    description: 'Call any Dart VM Service method or extension on the running app. isolateId auto-injected for ext.* calls.',
+    description:
+      'Call any method on the Dart VM Service of a running Flutter app. ' +
+      'This is an advanced/debugging tool. ' +
+      'For ext.* extension calls, the isolateId is injected automatically. ' +
+      'Useful examples: ' +
+      '"getVM" — inspect the running Dart VM and its isolates; ' +
+      '"ext.flutter.debugPaint" — toggle debug paint overlay; ' +
+      '"ext.flutter.debugDumpLayerTree" — dump the layer tree; ' +
+      '"evaluate" — evaluate a Dart expression in the running app (pass isolateId and expression). ' +
+      'Requires the session to be in "running" state and wsUri to be available (check flutter_status).',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: 'Project path. Optional when only one session is running.' },
-        method: { type: 'string', description: 'VM Service method or extension RPC, e.g. "getVM", "ext.flutter.debugPaint".' },
-        params: { type: 'object', description: 'Extra call parameters.' },
+        projectPath: { type: 'string', description: 'Project path. Can be omitted when only one session is active.' },
+        method: { type: 'string', description: 'VM Service RPC method name, e.g. "getVM", "ext.flutter.debugPaint", "evaluate".' },
+        params: { type: 'object', description: 'Parameters for the call. For ext.* calls, isolateId is injected automatically and does not need to be provided.' },
       },
       required: ['method'],
     },
