@@ -155,12 +155,18 @@ async function callTool(name, args) {
       let session;
       try { session = sessions.resolve(args.projectPath); }
       catch (e) { return { status: 'no_session', message: e.message }; }
-      return {
+      const out = {
         status: session.status, projectPath: session.projectPath, device: session.device,
         appId: session.appId, wsUri: session.wsUri, startedAt: session.startedAt,
         lastReloadAt: session.lastReloadAt, lastRestartAt: session.lastRestartAt,
         uptimeSeconds: Math.floor((Date.now() - session.startedAt.getTime()) / 1000),
       };
+      // While building or after an early exit, surface recent output so the
+      // caller polling flutter_status can see progress or the failure reason.
+      if (session.status !== 'running') {
+        out.recentOutput = session.daemon.stderr.slice(-8);
+      }
+      return out;
     }
 
     case 'flutter_list_sessions': {

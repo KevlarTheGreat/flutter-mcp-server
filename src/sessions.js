@@ -84,7 +84,12 @@ export class SessionManager {
     daemon.on('event:app.started', () => { session.status = 'running'; });
     daemon.on('exit', () => { session.status = 'stopped'; });
 
-    await this._waitForStarted(session, startTimeoutMs);
+    // Non-blocking: a cold build can exceed the MCP client's request timeout.
+    // Wait only a brief grace period to surface immediate launch failures
+    // (bad path, missing toolchain, env errors). If the build is still
+    // running after the grace window, return status 'starting' and let the
+    // caller poll flutter_status until it becomes 'running'.
+    await this._waitForStartedOrSettle(session, Math.min(startTimeoutMs, 4000));
     return session;
   }
 
@@ -185,19 +190,22 @@ export class SessionManager {
     });
   }
 
-  _waitForStarted(session, timeoutMs) {
+  /**
+   * Resolve when the app starts running OR after a grace window elapses
+   * (leaving status 'starting'). Reject only if the process exits early
+   * (within the grace window) — that's a genuine launch failure worth
+   * surfacing immediately. Long builds simply return 'starting'.
+   */
+  _waitForStartedOrSettle(session, graceMs) {
     if (session.status === 'running') return Promise.resolve();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error(`flutter_start timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      const timer = setTimeout(() => { cleanup(); resolve(); }, graceMs);
 
       const onStarted = () => { cleanup(); resolve(); };
       const onExit = (code) => {
         cleanup();
         const stderr = session.daemon.stderr.slice(-20).join('\n');
-        reject(new Error(`Flutter process exited (code ${code}) before app started.\n${stderr}`));
+        reject(new Error(`Flutter process exited (code ${code}) during launch.\n${stderr}`));
       };
       const cleanup = () => {
         clearTimeout(timer);
