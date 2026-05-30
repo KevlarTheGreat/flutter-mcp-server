@@ -10,6 +10,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
+import { buildSpawnEnv } from './env.js';
 
 const LOG_RING_SIZE = 500;
 
@@ -31,6 +32,7 @@ export class FlutterDaemon extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       shell: process.platform === 'win32',
+      env: buildSpawnEnv(),
     });
 
     const rl = createInterface({ input: this.proc.stdout, crlfDelay: Infinity });

@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { FlutterDaemon } from './daemon.js';
 import { VmServiceClient } from './vm-service.js';
+import { buildSpawnEnv } from './env.js';
 
 function normalisePath(p) {
   return path.resolve(p).replace(/\\/g, '/');
@@ -165,6 +166,7 @@ export class SessionManager {
       const proc = spawn('flutter', ['devices', '--machine'], {
         windowsHide: true,
         shell: process.platform === 'win32',
+        env: buildSpawnEnv(),
       });
       proc.stdout.on('data', (d) => (output += d.toString()));
       proc.on('close', (code) => {
